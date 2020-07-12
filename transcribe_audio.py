@@ -5,9 +5,12 @@ import wave
 import argparse
 import numpy as np
 import subprocess
+from tqdm import tqdm
+import os
 
 
 def extract_wav_from_video(video_path):
+    # extracts the audio of a video-file to a .wav-file in /tmp
     audio_path = '/tmp/audio.wav'
     command = "ffmpeg -y -i {0} -ab 160k -ac 2 -ar 44100 -vn {1}".format(video_path, audio_path)
     subprocess.call(command, shell=True)
@@ -55,43 +58,42 @@ def words_from_candidate_transcript(metadata):
     return word_list
 
 
-def process_wavefile(ds, wavefile, segment_length_ms):
-    with wave.open(wavefile, 'rb') as ain:
-        framerate = ain.getframerate()
-        nframes = ain.getnframes()
-        audio_length_ms = nframes * (1. / framerate) * 1000
+def process_wavefile(ds, wavefile, segment_length_ms, features_path):
+    with open(os.path.join(features_path, 'audio.csv'), 'w') as f:
+        with wave.open(wavefile, 'rb') as ain:
+            framerate = ain.getframerate()
+            nframes = ain.getnframes()
+            audio_length_ms = nframes * (1. / framerate) * 1000
 
-        for start_ms in range(0, int(audio_length_ms), segment_length_ms):
-            ain.setpos(int(start_ms / 1000. * framerate))
-            chunkData = np.frombuffer(ain.readframes(int(segment_length_ms / 1000. * framerate)), np.int16)
+            for start_ms in tqdm(range(0, int(audio_length_ms), segment_length_ms)):
+                ain.setpos(int(start_ms / 1000. * framerate))
+                chunkData = np.frombuffer(ain.readframes(int(segment_length_ms / 1000. * framerate)), np.int16)
 
-            words = metadata_to_string(ds.sttWithMetadata(chunkData, 1).transcripts[0])
+                words = metadata_to_string(ds.sttWithMetadata(chunkData, 1).transcripts[0])
 
-            print("{0} {1} {2}".format(start_ms, start_ms + segment_length_ms, words))
+                line = "{0} {1} {2}".format(start_ms, start_ms + segment_length_ms, words)
+                f.write(line)
+                print("{0} {1} {2}".format(start_ms, start_ms + segment_length_ms, words))
 
 
-def main(deepspeech_model, deepspeech_scorer, video_path, segment_length):
-    ds = Model('../deepspeech-0.7.4-models.pbmm')
-    scorer = '../deepspeech-0.7.4-models.scorer'
-    ds.enableExternalScorer(scorer)
-    #
-    # wavefile = '../audio/2830-3980-0043.wav'
-    #
-    segment_length_ms = 3000
+def main(deepspeech_model, deepspeech_scorer, video_path, features_path, segment_length_ms):
+    ds = Model(deepspeech_model)
+    ds.enableExternalScorer(deepspeech_scorer)
+
     max_length_ms = 600000  # 10 min
-    video_path = '../videos/unterordner/movies/Her_bluray_Szene_11_25fps.mp4'
 
     extract_wav_from_video(video_path)
 
-    process_wavefile(ds, '/tmp/audio.wav', segment_length_ms)
+    process_wavefile(ds, '/tmp/audio.wav', segment_length_ms, features_path)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('deepspeech_model', help='')
-    parser.add_argument('deepspeech_scorer', help='')
-    parser.add_argument('video_path', help='')
-    parser.add_argument('--segment_length', type=int, default=3000, help='')
+    parser.add_argument('video_path', help='path to the video to be transcribed')
+    parser.add_argument('features_path', help='path to the directory where the results are saved')
+    parser.add_argument('--deepspeech_model', default='../deepspeech-0.7.4-models.pbmm', help='path to a deepspeech model')
+    parser.add_argument('--deepspeech_scorer', default='../deepspeech-0.7.4-models.scorer', help='path to a deepspeech scorer')
+    parser.add_argument('--segment_length_ms', type=int, default=3000, help='')
     args = parser.parse_args()
 
-    main(args.deepspeech_model, args.deepspeech_scorer, args.video_path, args.segment_length)
+    main(args.deepspeech_model, args.deepspeech_scorer, args.video_path, args.features_path, args.segment_length_ms)
