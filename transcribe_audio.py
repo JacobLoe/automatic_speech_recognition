@@ -7,19 +7,30 @@ import numpy as np
 import subprocess
 from tqdm import tqdm
 import os
+import glob
+import shutil
+
+VERSION = '20200713'
 
 
-def extract_wav_from_video(video_path):
+def extract_wav_from_video(video_path, movie_id):
     # extracts the audio of a video-file to a .wav-file in /tmp
-    audio_path = '/tmp/audio.wav'
-    command = "ffmpeg -y -i {0} -ab 160k -ac 2 -ar 44100 -vn {1}".format(video_path, audio_path)
+    audio_path = '/tmp/'+str(movie_id)+'_audio.wav'
+
+    # -y -> overwrite output files
+    # -i -> inputfile
+    # outputfile options
+    # -ab -> audio bitrate
+    # -ac -> audio channels
+    # -ar -> audio sampling rate in Hz
+    # -vn -> disable video ??
+    command = "ffmpeg -y -loglevel quiet -i {0} -ab 160k -ac 2 -ar 44100 -vn {1}".format(video_path, audio_path)
     subprocess.call(command, shell=True)
 
 
-def metadata_to_string(metadata):
+def metadata_to_string(metadata, min_confidence):
     conf = np.abs(metadata.confidence)
-    print(conf)
-    if conf > 10.0:
+    if conf > min_confidence:
         return ''.join(token.text for token in metadata.tokens) + " ({0})".format(conf)
     else:
         return "SIL"
@@ -29,6 +40,9 @@ def words_from_candidate_transcript(metadata):
     word = ""
     word_list = []
     word_start_time = 0
+
+    conf = np.abs(metadata.confidence)
+
     # Loop through each character
     for i, token in enumerate(metadata.tokens):
         # Append character to word if it's not a space
@@ -47,7 +61,7 @@ def words_from_candidate_transcript(metadata):
 
             each_word = dict()
             each_word["word"] = word
-            each_word["start_time "] = round(word_start_time, 4)
+            each_word["start_time"] = round(word_start_time, 4)     # relative to chunks
             each_word["duration"] = round(word_duration, 4)
 
             word_list.append(each_word)
@@ -58,7 +72,7 @@ def words_from_candidate_transcript(metadata):
     return word_list
 
 
-def process_wavefile(ds, wavefile, segment_length_ms, features_path):
+def process_wavefile(ds, wavefile, segment_length_ms, features_path, min_confidence):
     with open(os.path.join(features_path, 'audio.csv'), 'w') as f:
         with wave.open(wavefile, 'rb') as ain:
             framerate = ain.getframerate()
@@ -69,31 +83,65 @@ def process_wavefile(ds, wavefile, segment_length_ms, features_path):
                 ain.setpos(int(start_ms / 1000. * framerate))
                 chunkData = np.frombuffer(ain.readframes(int(segment_length_ms / 1000. * framerate)), np.int16)
 
-                words = metadata_to_string(ds.sttWithMetadata(chunkData, 1).transcripts[0])
+                words = metadata_to_string(ds.sttWithMetadata(chunkData, 1).transcripts[0], min_confidence)
 
-                line = "{0} {1} {2}".format(start_ms, start_ms + segment_length_ms, words)
+                line = "{0} {1} {2}\n".format(start_ms, start_ms + segment_length_ms, words)
                 f.write(line)
-                print("{0} {1} {2}".format(start_ms, start_ms + segment_length_ms, words))
 
 
-def main(deepspeech_model, deepspeech_scorer, video_path, features_path, segment_length_ms):
+def transcribe(deepspeech_model, deepspeech_scorer, list_videos_path, movie_ids, features_path, segment_length_ms, min_confidence):
     ds = Model(deepspeech_model)
     ds.enableExternalScorer(deepspeech_scorer)
+    done = 0
+    while done < len(list_videos_path):
+        for v_path, mid in tqdm(zip(list_videos_path, movie_ids), total=len(list_videos_path)):
+            video_name = os.path.split(v_path)[1]
+            # the directory for the results
+            f_path = os.path.join(features_path, str(mid)+'_automatic_speech_recognition')
+            done_file_path = os.path.join(f_path, '.done')
 
-    max_length_ms = 600000  # 10 min
+            if not os.path.isdir(f_path):   # check if the directory for the movie exists
+                print('audio is being transcribed for {}'.format(video_name))
+                os.makedirs(f_path)     # create new directory
 
-    extract_wav_from_video(video_path)
+                extract_wav_from_video(v_path, mid)
+                audio_path = '/tmp/' + str(mid) + '_audio.wav'
+                process_wavefile(ds, audio_path, segment_length_ms, f_path, min_confidence)
 
-    process_wavefile(ds, '/tmp/audio.wav', segment_length_ms, features_path)
+                # create a hidden file to signal that the optical flow for a movie is done
+                # write the current version of the script in the file
+                with open(done_file_path, 'a') as d:
+                    d.write(VERSION)
+                done += 1  # count the instances of the optical flow done correctly
+            # do nothing if a .done-file exists and the versions in the file and the script match
+            elif os.path.isfile(done_file_path) and open(done_file_path, 'r').read() == VERSION:
+                done += 1  # count the instances of the optical flow done correctly
+                print('optical flow was already done for {}'.format(video_name))
+            # if the folder already exists but the .done-file doesn't, delete the folder
+            elif os.path.isfile(done_file_path) and not open(done_file_path, 'r').read() == VERSION:
+                shutil.rmtree(f_path)
+                print('versions did not match for {}'.format(video_name))
+            elif not os.path.isfile(done_file_path):
+                shutil.rmtree(f_path)
+                print('optical flow was not done correctly for {}'.format(video_name))
+
+
+def main(deepspeech_model, deepspeech_scorer, videos_path, features_path, segment_length_ms, min_confidence):
+    list_videos_path = glob.glob(os.path.join(videos_path, '**/*.mp4'), recursive=True)  # get the list of videos in videos_dir
+
+    movie_ids = list(range(len(list_videos_path)))
+
+    transcribe(deepspeech_model, deepspeech_scorer, list_videos_path, movie_ids, features_path, segment_length_ms, min_confidence)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('video_path', help='path to the video to be transcribed')
+    parser.add_argument('videos_path', help='path to the video to be transcribed')
     parser.add_argument('features_path', help='path to the directory where the results are saved')
     parser.add_argument('--deepspeech_model', default='../deepspeech-0.7.4-models.pbmm', help='path to a deepspeech model')
     parser.add_argument('--deepspeech_scorer', default='../deepspeech-0.7.4-models.scorer', help='path to a deepspeech scorer')
     parser.add_argument('--segment_length_ms', type=int, default=3000, help='')
+    parser.add_argument('--min_confidence', type=float, default=10.0, help='')
     args = parser.parse_args()
 
-    main(args.deepspeech_model, args.deepspeech_scorer, args.video_path, args.features_path, args.segment_length_ms)
+    main(args.deepspeech_model, args.deepspeech_scorer, args.videos_path, args.features_path, args.segment_length_ms, args.min_confidence)
