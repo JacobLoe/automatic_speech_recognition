@@ -10,7 +10,7 @@ import os
 import glob
 import shutil
 
-VERSION = '20200713'
+VERSION = '20200719'
 
 
 def extract_wav_from_video(video_path, movie_id):
@@ -72,32 +72,41 @@ def words_from_candidate_transcript(metadata):
     return word_list
 
 
-def process_wavefile(ds, wavefile, segment_length_ms, features_path, min_confidence):
+def process_wavefile(ds, wavefile, segment_length_ms, min_confidence):
+    transcript = []
+    with wave.open(wavefile, 'rb') as ain:
+        framerate = ain.getframerate()
+        nframes = ain.getnframes()
+        audio_length_ms = nframes * (1. / framerate) * 1000
+
+        for start_ms in tqdm(range(0, int(audio_length_ms), segment_length_ms)):
+            ain.setpos(int(start_ms / 1000. * framerate))
+            chunkData = np.frombuffer(ain.readframes(int(segment_length_ms / 1000. * framerate)), np.int16)
+
+            words = metadata_to_string(ds.sttWithMetadata(chunkData, 1).transcripts[0], min_confidence)
+
+            transcript.append((start_ms, start_ms + segment_length_ms, words))
+    return transcript
+
+
+def write_transcript_to_file(features_path, transcript):
     with open(os.path.join(features_path, 'audio.csv'), 'w') as f:
-        with wave.open(wavefile, 'rb') as ain:
-            framerate = ain.getframerate()
-            nframes = ain.getnframes()
-            audio_length_ms = nframes * (1. / framerate) * 1000
-
-            for start_ms in tqdm(range(0, int(audio_length_ms), segment_length_ms)):
-                ain.setpos(int(start_ms / 1000. * framerate))
-                chunkData = np.frombuffer(ain.readframes(int(segment_length_ms / 1000. * framerate)), np.int16)
-
-                words = metadata_to_string(ds.sttWithMetadata(chunkData, 1).transcripts[0], min_confidence)
-
-                line = "{0} {1} {2}\n".format(start_ms, start_ms + segment_length_ms, words)
-                f.write(line)
+        for t in transcript:
+            line = "{0} {1} {2}\n".format(t[0], t[1], t[2])
+            f.write(line)
 
 
 def transcribe(deepspeech_model, deepspeech_scorer, list_videos_path, movie_ids, features_path, segment_length_ms, min_confidence):
     ds = Model(deepspeech_model)
     ds.enableExternalScorer(deepspeech_scorer)
+
+    # repeat until all movies are transcribed correctly
     done = 0
     while done < len(list_videos_path):
         for v_path, mid in tqdm(zip(list_videos_path, movie_ids), total=len(list_videos_path)):
             video_name = os.path.split(v_path)[1]
             # the directory for the results
-            f_path = os.path.join(features_path, str(mid)+'_automatic_speech_recognition')
+            f_path = os.path.join(features_path, str(mid)+'.automatic_speech_recognition')
             done_file_path = os.path.join(f_path, '.done')
 
             if not os.path.isdir(f_path):   # check if the directory for the movie exists
@@ -106,7 +115,8 @@ def transcribe(deepspeech_model, deepspeech_scorer, list_videos_path, movie_ids,
 
                 extract_wav_from_video(v_path, mid)
                 audio_path = '/tmp/' + str(mid) + '_audio.wav'
-                process_wavefile(ds, audio_path, segment_length_ms, f_path, min_confidence)
+                transcript = process_wavefile(ds, audio_path, segment_length_ms, min_confidence)
+                write_transcript_to_file(f_path, transcript)
 
                 # create a hidden file to signal that the optical flow for a movie is done
                 # write the current version of the script in the file
@@ -129,6 +139,7 @@ def transcribe(deepspeech_model, deepspeech_scorer, list_videos_path, movie_ids,
 def main(deepspeech_model, deepspeech_scorer, videos_path, features_path, segment_length_ms, min_confidence):
     list_videos_path = glob.glob(os.path.join(videos_path, '**/*.mp4'), recursive=True)  # get the list of videos in videos_dir
 
+    # create a list of ids for every movie
     movie_ids = list(range(len(list_videos_path)))
 
     transcribe(deepspeech_model, deepspeech_scorer, list_videos_path, movie_ids, features_path, segment_length_ms, min_confidence)
