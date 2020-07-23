@@ -9,8 +9,9 @@ from tqdm import tqdm
 import os
 import glob
 import shutil
+import hashlib
 
-VERSION = '20200719'
+VERSION = '20200722'
 
 
 def extract_wav_from_video(video_path, movie_id):
@@ -22,9 +23,9 @@ def extract_wav_from_video(video_path, movie_id):
     # outputfile options
     # -ab -> audio bitrate
     # -ac -> audio channels
-    # -ar -> audio sampling rate in Hz
+    # -ar -> audio sampling rate in Hz  # 44100
     # -vn -> disable video ??
-    command = "ffmpeg -y -loglevel quiet -i {0} -ab 160k -ac 2 -ar 44100 -vn {1}".format(video_path, audio_path)
+    command = "ffmpeg -y -loglevel quiet -i {0} -ab 160k -ac 1 -ar 16000 -vn {1}".format(video_path, audio_path)
     subprocess.call(command, shell=True)
 
 
@@ -63,6 +64,7 @@ def words_from_candidate_transcript(metadata):
             each_word["word"] = word
             each_word["start_time"] = round(word_start_time, 4)     # relative to chunks
             each_word["duration"] = round(word_duration, 4)
+            each_word["confidence"] = conf
 
             word_list.append(each_word)
             # Reset
@@ -79,14 +81,55 @@ def process_wavefile(ds, wavefile, segment_length_ms, min_confidence):
         nframes = ain.getnframes()
         audio_length_ms = nframes * (1. / framerate) * 1000
 
-        for start_ms in tqdm(range(0, int(audio_length_ms), segment_length_ms)):
+        for start_ms in range(0, int(audio_length_ms), int(segment_length_ms)):
+
             ain.setpos(int(start_ms / 1000. * framerate))
             chunkData = np.frombuffer(ain.readframes(int(segment_length_ms / 1000. * framerate)), np.int16)
 
-            words = metadata_to_string(ds.sttWithMetadata(chunkData, 1).transcripts[0], min_confidence)
+            words = words_from_candidate_transcript(ds.sttWithMetadata(chunkData, 1).transcripts[0])#, min_confidence)
+            # words = metadata_to_string(ds.sttWithMetadata(chunkData, 1).transcripts[0], min_confidence)
+            # print(words)
 
             transcript.append((start_ms, start_ms + segment_length_ms, words))
     return transcript
+
+
+def process_transcript(ds, wavefile, transcript, overlap_length_ms, confidence):
+    new_transcript = []
+    with wave.open(wavefile, 'rb') as ain:
+        framerate = ain.getframerate()
+        nframes = ain.getnframes()
+        audio_length_ms = nframes * (1. / framerate) * 1000
+        for t in transcript:
+            begin = t[1]-overlap_length_ms/2
+            # stop
+            if begin+overlap_length_ms >= audio_length_ms:     # stop
+                break
+            ain.setpos(int(begin/1000. * framerate))
+            chunkData = np.frombuffer(ain.readframes(int(overlap_length_ms / 1000. * framerate)), np.int16)
+            words = words_from_candidate_transcript(ds.sttWithMetadata(chunkData, 1).transcripts[0])
+
+            if t[2]:
+                if t[2][0]['confidence'] > confidence:
+                    line = ' '.join(x['word'] for x in t[2])
+                    if words:
+                        if words[0]['confidence'] > confidence:
+                            line = line.join(w['word'] for w in words)
+                            print(line)
+                    new_transcript.append((t[0], t[1], line))
+                else:
+                    if words:
+                        if words[0]['confidence'] > confidence:
+                            line = " ".join(w['word'] for w in words)
+                            new_transcript.append((t[0], t[1], line))
+                        else:
+                            new_transcript.append((t[0], t[1], 'SIL'))
+                    else:
+                        new_transcript.append((t[0], t[1], 'SIL'))
+            else:
+                new_transcript.append((t[0], t[1], 'SIL'))
+
+    return new_transcript
 
 
 def write_transcript_to_file(features_path, transcript):
@@ -96,7 +139,8 @@ def write_transcript_to_file(features_path, transcript):
             f.write(line)
 
 
-def transcribe(deepspeech_model, deepspeech_scorer, list_videos_path, movie_ids, features_path, segment_length_ms, min_confidence):
+def transcribe(deepspeech_model, deepspeech_scorer, list_videos_path, movie_ids,
+               features_path, segment_length_ms, overlap_length_ms, min_confidence):
     ds = Model(deepspeech_model)
     ds.enableExternalScorer(deepspeech_scorer)
 
@@ -116,8 +160,8 @@ def transcribe(deepspeech_model, deepspeech_scorer, list_videos_path, movie_ids,
                 extract_wav_from_video(v_path, mid)
                 audio_path = '/tmp/' + str(mid) + '_audio.wav'
                 transcript = process_wavefile(ds, audio_path, segment_length_ms, min_confidence)
-                write_transcript_to_file(f_path, transcript)
-
+                new_transcript = process_transcript(ds, audio_path, transcript,overlap_length_ms,  min_confidence)
+                write_transcript_to_file(f_path, new_transcript)
                 # create a hidden file to signal that the optical flow for a movie is done
                 # write the current version of the script in the file
                 with open(done_file_path, 'a') as d:
@@ -136,13 +180,12 @@ def transcribe(deepspeech_model, deepspeech_scorer, list_videos_path, movie_ids,
                 print('optical flow was not done correctly for {}'.format(video_name))
 
 
-def main(deepspeech_model, deepspeech_scorer, videos_path, features_path, segment_length_ms, min_confidence):
+def main(deepspeech_model, deepspeech_scorer, videos_path, features_path, segment_length_ms, overlap_length_ms, min_confidence):
     list_videos_path = glob.glob(os.path.join(videos_path, '**/*.mp4'), recursive=True)  # get the list of videos in videos_dir
 
-    # create a list of ids for every movie
-    movie_ids = list(range(len(list_videos_path)))
+    movie_ids = [hashlib.sha256(os.path.split(v)[-1][:-4].encode('utf8')).hexdigest() for v in list_videos_path]
 
-    transcribe(deepspeech_model, deepspeech_scorer, list_videos_path, movie_ids, features_path, segment_length_ms, min_confidence)
+    transcribe(deepspeech_model, deepspeech_scorer, list_videos_path, movie_ids, features_path, segment_length_ms, overlap_length_ms, min_confidence)
 
 
 if __name__ == "__main__":
@@ -152,7 +195,9 @@ if __name__ == "__main__":
     parser.add_argument('--deepspeech_model', default='../deepspeech-0.7.4-models.pbmm', help='path to a deepspeech model')
     parser.add_argument('--deepspeech_scorer', default='../deepspeech-0.7.4-models.scorer', help='path to a deepspeech scorer')
     parser.add_argument('--segment_length_ms', type=int, default=3000, help='')
+    parser.add_argument('--overlap_length_ms', type=int, default=400, help='')
     parser.add_argument('--min_confidence', type=float, default=10.0, help='')
     args = parser.parse_args()
 
-    main(args.deepspeech_model, args.deepspeech_scorer, args.videos_path, args.features_path, args.segment_length_ms, args.min_confidence)
+    main(args.deepspeech_model, args.deepspeech_scorer, args.videos_path, args.features_path,
+         args.segment_length_ms, args.overlap_length_ms, args.min_confidence)
