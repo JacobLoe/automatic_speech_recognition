@@ -37,7 +37,7 @@ def metadata_to_string(metadata, min_confidence):
         return "SIL"
 
 
-def words_from_candidate_transcript(metadata):
+def words_from_candidate_transcript(metadata, start_ms):
     word = ""
     word_list = []
     word_start_time = 0
@@ -62,8 +62,9 @@ def words_from_candidate_transcript(metadata):
 
             each_word = dict()
             each_word["word"] = word
-            each_word["start_time"] = round(word_start_time, 4)     # relative to chunks
-            each_word["duration"] = round(word_duration, 4)
+            # time in milliseconds,
+            each_word["start_time"] = start_ms + int(round(word_start_time, 4)*1000)
+            each_word["duration"] = int(round(word_duration, 4)*1000)
             each_word["confidence"] = conf
 
             word_list.append(each_word)
@@ -86,7 +87,7 @@ def process_wavefile(ds, wavefile, segment_length_ms, min_confidence):
             ain.setpos(int(start_ms / 1000. * framerate))
             chunkData = np.frombuffer(ain.readframes(int(segment_length_ms / 1000. * framerate)), np.int16)
 
-            words = words_from_candidate_transcript(ds.sttWithMetadata(chunkData, 1).transcripts[0])#, min_confidence)
+            words = words_from_candidate_transcript(ds.sttWithMetadata(chunkData, 1).transcripts[0], start_ms)
             # words = metadata_to_string(ds.sttWithMetadata(chunkData, 1).transcripts[0], min_confidence)
             # print(words)
 
@@ -96,39 +97,36 @@ def process_wavefile(ds, wavefile, segment_length_ms, min_confidence):
 
 def process_transcript(ds, wavefile, transcript, overlap_length_ms, confidence):
     new_transcript = []
+    # print(transcript[8])
+    # print(asd)
     with wave.open(wavefile, 'rb') as ain:
         framerate = ain.getframerate()
         nframes = ain.getnframes()
         audio_length_ms = nframes * (1. / framerate) * 1000
-        for t in transcript:
-            begin = t[1]-overlap_length_ms/2
-            # stop
-            if begin+overlap_length_ms >= audio_length_ms:     # stop
+        for begin_segment, end_segment, segment in transcript:#[12:15]:
+            # print(segment)
+            begin_overlap = end_segment-overlap_length_ms/2
+            if begin_overlap+overlap_length_ms >= audio_length_ms:
                 break
-            ain.setpos(int(begin/1000. * framerate))
+            ain.setpos(int(begin_overlap/1000. * framerate))
             chunkData = np.frombuffer(ain.readframes(int(overlap_length_ms / 1000. * framerate)), np.int16)
-            words = words_from_candidate_transcript(ds.sttWithMetadata(chunkData, 1).transcripts[0])
-
-            if t[2]:
-                if t[2][0]['confidence'] > confidence:
-                    line = ' '.join(x['word'] for x in t[2])
-                    if words:
-                        if words[0]['confidence'] > confidence:
-                            line = line.join(w['word'] for w in words)
-                            print(line)
-                    new_transcript.append((t[0], t[1], line))
-                else:
-                    if words:
-                        if words[0]['confidence'] > confidence:
-                            line = " ".join(w['word'] for w in words)
-                            new_transcript.append((t[0], t[1], line))
-                        else:
-                            new_transcript.append((t[0], t[1], 'SIL'))
-                    else:
-                        new_transcript.append((t[0], t[1], 'SIL'))
+            segment_overlap = words_from_candidate_transcript(ds.sttWithMetadata(chunkData, 1).transcripts[0], begin_overlap)
+            # print(segment_overlap)
+            if segment:    # check if the transcript contains any word
+                line = ' '.join(word['word'] for word in segment)    # concatenate the words in the transcript into one line
+                if segment_overlap:     # check if any words are in the overlap
+                    for so in segment_overlap:   # for every word in the overlap check if there already is a word in the current segment at the timestamp
+                        for word in segment:
+                            if so['start_time'] == word['start_time']:
+                                break
+                        line = line+' '+so['word']
+                new_transcript.append((begin_segment, end_segment, line))
             else:
-                new_transcript.append((t[0], t[1], 'SIL'))
-
+                new_transcript.append((begin_segment, end_segment, 'SIL'))
+            # print(new_transcript[-1])
+            # print('\n')
+    #
+    # print(ads)
     return new_transcript
 
 
@@ -195,7 +193,7 @@ if __name__ == "__main__":
     parser.add_argument('--deepspeech_model', default='../deepspeech-0.7.4-models.pbmm', help='path to a deepspeech model')
     parser.add_argument('--deepspeech_scorer', default='../deepspeech-0.7.4-models.scorer', help='path to a deepspeech scorer')
     parser.add_argument('--segment_length_ms', type=int, default=3000, help='')
-    parser.add_argument('--overlap_length_ms', type=int, default=400, help='')
+    parser.add_argument('--overlap_length_ms', type=int, default=200, help='')
     parser.add_argument('--min_confidence', type=float, default=10.0, help='')
     args = parser.parse_args()
 
