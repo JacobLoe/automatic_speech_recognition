@@ -11,7 +11,7 @@ import glob
 import shutil
 import hashlib
 
-VERSION = '20200731'
+VERSION = '20200807'
 
 
 def extract_wav_from_video(video_path, movie_id):
@@ -29,48 +29,46 @@ def extract_wav_from_video(video_path, movie_id):
     subprocess.call(command, shell=True)
 
 
-def metadata_to_string(metadata, min_confidence):
-    conf = np.abs(metadata.confidence)
-    if conf > min_confidence:
-        return ''.join(token.text for token in metadata.tokens) + " ({0})".format(conf)
-    else:
-        return "SIL"
-
-
-def words_from_candidate_transcript(metadata, start_ms):
+def words_from_candidate_transcript(metadata, start_ms, segment_lenght, min_confidence):
     word = ""
     word_list = []
     word_start_time = 0
 
-    conf = np.abs(metadata.confidence)
+    conf = np.abs(metadata.confidence)  # this results in every word having the same confidence
+    if conf >= min_confidence:
+        # Loop through each character
+        for i, token in enumerate(metadata.tokens):
+            # Append character to word if it's not a space
+            if token.text != " ":
+                if len(word) == 0:
+                    # Log the start time of the new word
+                    word_start_time = token.start_time
 
-    # Loop through each character
-    for i, token in enumerate(metadata.tokens):
-        # Append character to word if it's not a space
-        if token.text != " ":
-            if len(word) == 0:
-                # Log the start time of the new word
-                word_start_time = token.start_time
+                word = word + token.text
+            # Word boundary is either a space or the last character in the array
+            if token.text == " " or i == len(metadata.tokens) - 1:
+                word_duration = token.start_time - word_start_time
 
-            word = word + token.text
-        # Word boundary is either a space or the last character in the array
-        if token.text == " " or i == len(metadata.tokens) - 1:
-            word_duration = token.start_time - word_start_time
+                if word_duration < 0:
+                    word_duration = 0
 
-            if word_duration < 0:
-                word_duration = 0
+                each_word = dict()
+                each_word["word"] = word
+                each_word["start_time"] = start_ms + int(round(word_start_time, 4)*1000)                    # time in milliseconds,
+                each_word["duration"] = int(round(word_duration, 4)*1000)
+                each_word["confidence"] = conf
 
-            each_word = dict()
-            each_word["word"] = word
-            # time in milliseconds,
-            each_word["start_time"] = start_ms + int(round(word_start_time, 4)*1000)
-            each_word["duration"] = int(round(word_duration, 4)*1000)
-            each_word["confidence"] = conf
-
-            word_list.append(each_word)
-            # Reset
-            word = ""
-            word_start_time = 0
+                word_list.append(each_word)
+                # Reset
+                word = ""
+                word_start_time = 0
+    else:
+        each_word = dict()
+        each_word["word"] = 'SIL'
+        each_word["start_time"] = start_ms
+        each_word["duration"] = segment_lenght
+        each_word["confidence"] = conf
+        word_list.append(each_word)
 
     return word_list
 
@@ -87,13 +85,13 @@ def process_wavefile(ds, wavefile, segment_length_ms, min_confidence):
             ain.setpos(int(start_ms / 1000. * framerate))
             chunkData = np.frombuffer(ain.readframes(int(segment_length_ms / 1000. * framerate)), np.int16)
 
-            words = words_from_candidate_transcript(ds.sttWithMetadata(chunkData, 1).transcripts[0], start_ms)
+            words = words_from_candidate_transcript(ds.sttWithMetadata(chunkData, 1).transcripts[0], start_ms, segment_length_ms, min_confidence)
 
             transcript.append((start_ms, start_ms + segment_length_ms, words))
     return transcript
 
 
-def get_overlapping_segments(ds, wavefile, transcript, overlap_length_ms):
+def get_overlapping_segments(ds, wavefile, transcript, overlap_length_ms, min_confidence):
     new_transcript = []
     with wave.open(wavefile, 'rb') as ain:
         framerate = ain.getframerate()
@@ -105,7 +103,7 @@ def get_overlapping_segments(ds, wavefile, transcript, overlap_length_ms):
                 break
             ain.setpos(int(begin_overlap/1000. * framerate))
             chunkData = np.frombuffer(ain.readframes(int(overlap_length_ms / 1000. * framerate)), np.int16)
-            segment_overlap = words_from_candidate_transcript(ds.sttWithMetadata(chunkData, 1).transcripts[0], begin_overlap)
+            segment_overlap = words_from_candidate_transcript(ds.sttWithMetadata(chunkData, 1).transcripts[0], begin_overlap, overlap_length_ms, min_confidence)
 
             new_transcript.append((begin_segment, end_segment, segment))
             new_transcript.append(segment_overlap)
@@ -121,11 +119,13 @@ def process_transcript(transcript, timestamp_threshold):
         begin_segment, end_segment, segment = transcript[i]
         if transcript[i+1]:     # check whether a overlap exists
             ov_segment = transcript[i+1]    # get the words and timestamps from the overlap
+            # if ov_segment[0]['confidence'] < min_confidence: # check if the confidence of the overlap is higher than the required confidence
+            #     break
             line = ' '  # start an empty line
             for s in segment:   # for every word in the segment
                 line = line+' '+s['word']   # add the current word to the line
                 for o in ov_segment:    # for every word in the overlap, check if the distance between the timestamp of two words is within the threshold
-                    if np.absolute(o['start_time'] - s['start_time']) < timestamp_threshold:
+                    if np.absolute(o['start_time'] - s['start_time']) < timestamp_threshold:    # and o['confidence'] > min_confidence
                         if s['word'].find(o['word']) == -1 and o['word'].find(s['word']) == -1:  # if neither word is a subset of the other -> the words are completely different
                             # append o to the line
                             line = line + ' ' + (o['word'])  # add the current word in the overlap to the line, if the above conditions are true
@@ -169,7 +169,7 @@ def transcribe(deepspeech_model, deepspeech_scorer, list_videos_path, movie_ids,
                 extract_wav_from_video(v_path, mid)
                 audio_path = '/tmp/' + str(mid) + '_audio.wav'
                 transcript = process_wavefile(ds, audio_path, segment_length_ms, min_confidence)
-                transcript_with_overlaps = get_overlapping_segments(ds, audio_path, transcript, overlap_length_ms)
+                transcript_with_overlaps = get_overlapping_segments(ds, audio_path, transcript, overlap_length_ms, min_confidence)
                 new_transcript = process_transcript(transcript_with_overlaps, timestamp_threshold)
                 write_transcript_to_file(f_path, new_transcript)
                 # create a hidden file to signal that the optical flow for a movie is done
