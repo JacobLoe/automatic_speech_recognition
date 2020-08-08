@@ -10,8 +10,10 @@ import os
 import glob
 import shutil
 import hashlib
+from idmapper import TSVIdMapper
 
-VERSION = '20200807'
+VERSION = '20200808'
+EXTRACTOR = 'automatic_speech_recognition'
 
 
 def extract_wav_from_video(video_path, movie_id):
@@ -142,66 +144,64 @@ def process_transcript(transcript, timestamp_threshold):
 
 
 def write_transcript_to_file(features_path, transcript):
-    with open(os.path.join(features_path, 'audio.csv'), 'w') as f:
+    with open(os.path.join(features_path), 'w') as f:
         for t in transcript:
             line = "{0} {1} {2}\n".format(t[0], t[1], t[2])
             f.write(line)
 
 
-def transcribe(deepspeech_model, deepspeech_scorer, list_videos_path, movie_ids,
-               features_path, segment_length_ms, overlap_length_ms, min_confidence, timestamp_threshold):
+def main(deepspeech_model, deepspeech_scorer, videos_root, features_root, segment_length_ms, overlap_length_ms, min_confidence, timestamp_threshold, videoids, idmapper):
+    print("Generating transcripts for {0} videos".format(len(videoids)))
     ds = Model(deepspeech_model)
     ds.enableExternalScorer(deepspeech_scorer)
 
     # repeat until all movies are transcribed correctly
     done = 0
-    while done < len(list_videos_path):
-        for v_path, mid in tqdm(zip(list_videos_path, movie_ids), total=len(list_videos_path)):
-            video_name = os.path.split(v_path)[1]
-            # the directory for the results
-            f_path = os.path.join(features_path, str(mid)+'.automatic_speech_recognition')
-            done_file_path = os.path.join(f_path, '.done')
+    for videoid in tqdm(videoids):
+        try:
+            video_rel_path = idmapper.get_filename(videoid)
+        except KeyError as err:
+            print("No such videoid: '{videoid}'".format(videoid=videoid))
+            done += 1
 
-            if not os.path.isdir(f_path):   # check if the directory for the movie exists
-                print('audio is being transcribed for {}'.format(video_name))
-                os.makedirs(f_path)     # create new directory
+        video_name = os.path.basename(video_rel_path)[:-4]
+        features_dir = os.path.join(features_root, videoid, EXTRACTOR)
+        # print('features_dir',features_dir)
+        if not os.path.isdir(features_dir):
+            os.makedirs(features_dir)
 
-                extract_wav_from_video(v_path, mid)
-                audio_path = '/tmp/' + str(mid) + '_audio.wav'
-                transcript = process_wavefile(ds, audio_path, segment_length_ms, min_confidence)
-                transcript_with_overlaps = get_overlapping_segments(ds, audio_path, transcript, overlap_length_ms, min_confidence)
-                new_transcript = process_transcript(transcript_with_overlaps, timestamp_threshold)
-                write_transcript_to_file(f_path, new_transcript)
-                # create a hidden file to signal that the optical flow for a movie is done
-                # write the current version of the script in the file
-                with open(done_file_path, 'a') as d:
-                    d.write(VERSION)
-                done += 1  # count the instances of the optical flow done correctly
+        features_fname_vid = "{videoid}.opticalflow.csv".format(videoid=videoid)
+        f_path_csv = os.path.join(features_dir, features_fname_vid)
+        done_file_path = os.path.join(features_dir, '.done')
+
+        v_path = os.path.join(videos_root, video_rel_path)
+        if not os.path.isfile(done_file_path) or not open(done_file_path, 'r').read() == VERSION:
+            print('automatic speech recognition results missing or version did not match, generating transcript for {video_name}'.format(video_name=video_name))
+            extract_wav_from_video(v_path, videoid)
+            audio_path = '/tmp/' + str(videoid) + '_audio.wav'
+            transcript = process_wavefile(ds, audio_path, segment_length_ms, min_confidence)
+            transcript_with_overlaps = get_overlapping_segments(ds, audio_path, transcript, overlap_length_ms, min_confidence)
+            new_transcript = process_transcript(transcript_with_overlaps, timestamp_threshold)
+            write_transcript_to_file(f_path_csv, new_transcript)
+
+            # create a hidden file to signal that the optical flow for a movie is done
+            # write the current version of the script in the file
+            with open(done_file_path, 'w') as d:
+                d.write(VERSION)
+            done += 1  # count the instances of the optical flow done correctly
+
+        else:
             # do nothing if a .done-file exists and the versions in the file and the script match
-            elif os.path.isfile(done_file_path) and open(done_file_path, 'r').read() == VERSION:
-                done += 1  # count the instances of the optical flow done correctly
-                print('optical flow was already done for {}'.format(video_name))
-            # if the folder already exists but the .done-file doesn't, delete the folder
-            elif os.path.isfile(done_file_path) and not open(done_file_path, 'r').read() == VERSION:
-                shutil.rmtree(f_path)
-                print('versions did not match for {}'.format(video_name))
-            elif not os.path.isfile(done_file_path):
-                shutil.rmtree(f_path)
-                print('optical flow was not done correctly for {}'.format(video_name))
-
-
-def main(deepspeech_model, deepspeech_scorer, videos_path, features_path, segment_length_ms, overlap_length_ms, min_confidence, timestamp_threshold):
-    list_videos_path = glob.glob(os.path.join(videos_path, '**/*.mp4'), recursive=True)  # get the list of videos in videos_dir
-
-    movie_ids = [hashlib.sha256(os.path.split(v)[-1][:-4].encode('utf8')).hexdigest() for v in list_videos_path]
-
-    transcribe(deepspeech_model, deepspeech_scorer, list_videos_path, movie_ids, features_path, segment_length_ms, overlap_length_ms, min_confidence, timestamp_threshold)
+            done += 1  # count the instances of the optical flow done correctly
+            print('automatic speech recognition was already done for {video}'.format(video=video_name))
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('videos_path', help='path to the video to be transcribed')
     parser.add_argument('features_path', help='path to the directory where the results are saved')
+    parser.add_argument('file_mappings', help='path to file mappings .tsv-file')
+    parser.add_argument("videoids", help="List of video ids. If empty, entire corpus is iterated.", nargs='*')
     parser.add_argument('--deepspeech_model', default='../deepspeech-0.7.4-models.pbmm', help='path to a deepspeech model, default is ../deepspeech-0.7.4-models.pbmm')
     parser.add_argument('--deepspeech_scorer', default='../deepspeech-0.7.4-models.scorer', help='path to a deepspeech scorer, default is ../deepspeech-0.7.4-models.scorer')
     parser.add_argument('--segment_length_ms', type=int, default=3000, help='lenght of the segments for which audio is transcribed, in milliseconds, default 3000')
@@ -212,5 +212,8 @@ if __name__ == "__main__":
                                                                             'in milliseconds, default')
     args = parser.parse_args()
 
+    idmapper = TSVIdMapper(args.file_mappings)
+    videoids = args.videoids if len(args.videoids) > 0 else idmapper.get_ids()
+
     main(args.deepspeech_model, args.deepspeech_scorer, args.videos_path, args.features_path,
-         args.segment_length_ms, args.overlap_length_ms, args.min_confidence, args.timestamp_threshold)
+         args.segment_length_ms, args.overlap_length_ms, args.min_confidence, args.timestamp_threshold, videoids, idmapper)
