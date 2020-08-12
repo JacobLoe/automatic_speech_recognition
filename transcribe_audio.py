@@ -12,8 +12,8 @@ import shutil
 import hashlib
 from idmapper import TSVIdMapper
 
-VERSION = '20200812'
-EXTRACTOR = 'automatic_speech_recognition'
+VERSION = '20200812.2'
+EXTRACTOR = 'asr'
 
 
 def extract_wav_from_video(video_path, movie_id):
@@ -123,7 +123,7 @@ def process_transcript(transcript, timestamp_threshold):
             ov_segment = transcript[i+1]    # get the words and timestamps from the overlap
             # if ov_segment[0]['confidence'] < min_confidence: # check if the confidence of the overlap is higher than the required confidence
             #     break
-            line = ' '  # start an empty line
+            line = ''  # start an empty line
             for s in segment:   # for every word in the segment
                 line = line+' '+s['word']   # add the current word to the line
                 for o in ov_segment:    # for every word in the overlap, check if the distance between the timestamp of two words is within the threshold
@@ -138,6 +138,7 @@ def process_transcript(transcript, timestamp_threshold):
                             pass
         else:
             line = ' '.join(s['word'] for s in segment)     # join the words in the segment into a sentence
+        line = line.strip() # remove trailing and eading whitespaces 
         new_transcript.append((begin_segment, end_segment, line))
         i += 2  # jump to the next segment
     return new_transcript
@@ -146,7 +147,7 @@ def process_transcript(transcript, timestamp_threshold):
 def write_transcript_to_file(features_path, transcript):
     with open(os.path.join(features_path), 'w') as f:
         for t in transcript:
-            line = "{0} {1} {2}\n".format(t[0], t[1], t[2])
+            line = "{start}\t{end}\t{transcript}\n".format(start=t[0], end=t[1], transcript=t[2])
             f.write(line)
 
 
