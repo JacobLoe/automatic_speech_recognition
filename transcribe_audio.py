@@ -7,9 +7,6 @@ import numpy as np
 import subprocess
 from tqdm import tqdm
 import os
-import glob
-import shutil
-import hashlib
 from idmapper import TSVIdMapper
 
 VERSION = '20200808'
@@ -134,10 +131,10 @@ def process_transcript(transcript, timestamp_threshold):
                         elif o['word'].find(s['word']) == 0 and not len(o['word']) == len(s['word']):    # if s is subset of o (o is the longer word) and starts at index 0 of o (and the words aren't the same)
                             # replace s with o
                             line = o['word'].join(line.rsplit(s['word'], 1))    # replace the last added word s with the word o
-                        else:   # for every other case, (o is subset of s, word indexes start anything other than 0) do nothing
+                        else:   # do nothing for every other case, (o is subset of s, word indexes start anything other than 0)
                             pass
-        else:
-            line = ' '.join(s['word'] for s in segment)     # join the words in the segment into a sentence
+        else:   # if no overlap existed, add the words in the segment up to a sentence
+            line = ' '.join(s['word'] for s in segment)
         new_transcript.append((begin_segment, end_segment, line))
         i += 2  # jump to the next segment
     return new_transcript
