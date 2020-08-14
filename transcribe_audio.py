@@ -9,8 +9,8 @@ from tqdm import tqdm
 import os
 from idmapper import TSVIdMapper
 
-VERSION = '20200808'
-EXTRACTOR = 'automatic_speech_recognition'
+VERSION = '20200812.2'
+EXTRACTOR = 'asr'
 
 
 def extract_wav_from_video(video_path, movie_id):
@@ -120,7 +120,7 @@ def process_transcript(transcript, timestamp_threshold):
             ov_segment = transcript[i+1]    # get the words and timestamps from the overlap
             # if ov_segment[0]['confidence'] < min_confidence: # check if the confidence of the overlap is higher than the required confidence
             #     break
-            line = ' '  # start an empty line
+            line = ''  # start an empty line
             for s in segment:   # for every word in the segment
                 line = line+' '+s['word']   # add the current word to the line
                 for o in ov_segment:    # for every word in the overlap, check if the distance between the timestamp of two words is within the threshold
@@ -135,6 +135,7 @@ def process_transcript(transcript, timestamp_threshold):
                             pass
         else:   # if no overlap existed, add the words in the segment up to a sentence
             line = ' '.join(s['word'] for s in segment)
+        line = line.strip() # remove trailing and eading whitespaces
         new_transcript.append((begin_segment, end_segment, line))
         i += 2  # jump to the next segment
     return new_transcript
@@ -143,7 +144,7 @@ def process_transcript(transcript, timestamp_threshold):
 def write_transcript_to_file(features_path, transcript):
     with open(os.path.join(features_path), 'w') as f:
         for t in transcript:
-            line = "{0} {1} {2}\n".format(t[0], t[1], t[2])
+            line = "{start}\t{end}\t{transcript}\n".format(start=t[0], end=t[1], transcript=t[2])
             f.write(line)
 
 
@@ -167,7 +168,7 @@ def main(deepspeech_model, deepspeech_scorer, videos_root, features_root, segmen
         if not os.path.isdir(features_dir):
             os.makedirs(features_dir)
 
-        features_fname_vid = "{videoid}.opticalflow.csv".format(videoid=videoid)
+        features_fname_vid = "{videoid}.{extractor}.csv".format(videoid=videoid, extractor=EXTRACTOR)
         f_path_csv = os.path.join(features_dir, features_fname_vid)
         done_file_path = os.path.join(features_dir, '.done')
 
@@ -181,15 +182,15 @@ def main(deepspeech_model, deepspeech_scorer, videos_root, features_root, segmen
             new_transcript = process_transcript(transcript_with_overlaps, timestamp_threshold)
             write_transcript_to_file(f_path_csv, new_transcript)
 
-            # create a hidden file to signal that the optical flow for a movie is done
+            # create a hidden file to signal that the asr for a movie is done
             # write the current version of the script in the file
             with open(done_file_path, 'w') as d:
                 d.write(VERSION)
-            done += 1  # count the instances of the optical flow done correctly
+            done += 1  # count the instances of the asr done correctly
 
         else:
             # do nothing if a .done-file exists and the versions in the file and the script match
-            done += 1  # count the instances of the optical flow done correctly
+            done += 1  # count the instances of the asr done correctly
             print('automatic speech recognition was already done for {video}'.format(video=video_name))
 
 
